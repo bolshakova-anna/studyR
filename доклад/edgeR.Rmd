@@ -1,0 +1,164 @@
+---
+title: "EdgeR"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+Большакова Анна 5030102/90401
+
+Название пакета расшифровывается как анализ цифровой экспрессии генов в R.
+
+Работает с целочисленными таблицами.
+
+![](https://sun9-22.userapi.com/impg/Jq8nRQHbzZ8aUKQcIvSUnpnRI96BKvqNyfjs6Q/Toa_5aaYOgQ.jpg?size=1845x992&quality=96&sign=c843d6d99232c705737dc4a376a539b8&type=album)
+
+* ## Реализует ряд статистических методологий, основанных на отрицательных биномиальных распределениях, включая эмпирическую байесовскую оценку, точные тесты, обобщенные линейные модели и тесты квазиправдоподобия.
+
+* ## Применяется для
+  + ## RNA-seq
+  + ## ChIP-seq
+  + ## ATACseq
+  + ## Bisulfite-seq
+  + ## SAGE
+  + ## CAGE
+
+![](https://sun9-39.userapi.com/impg/9MMaI4apbAX0b5b85a-0ef-sxwxjf9QnFm0RUQ/fOAOE8Gdn_A.jpg?size=1197x673&quality=96&sign=d0161518aafd11284430e54bcbdd15c0&type=album)
+
+## Pipiline. Пример
+
+Установка пакета:
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("edgeR")
+```
+
+```{r}
+library(edgeR)
+```
+
+## 0. Чтение таблицы
+
+```{r}
+library(edgeR)
+load("Counts.RData")
+Counts <- tmp$counts
+colnames(Counts) <- c("16N", "16T", "18N", "18T", "19N", "19T")
+dim(Counts)
+head(Counts)
+
+```
+
+## 1. Create DGEList
+
+!! Философия этого пакета заключается в том, что вся информация должна содержаться в одной переменной. Когда мы позже будем использовать функции из этого пакета, мы напишем что-то вроде d <- AssessmentCommonDisp(d), что, как мы обычно предположили бы, перезаписывает d. Вместо этого эта функция пропускает через функцию все, что уже было в d, но просто добавляет в список еще один элемент.
+
+
+```{r}
+dgList <- DGEList(counts=Counts, genes=rownames(Counts))
+
+ dgList
+# dgList$samples
+# head(dgList$counts) 
+# head(dgList$genes) 
+
+```
+## 2. Filtering
+
+В этом наборе данных около 26000 генов. Однако многие из них не будут выражены или не будут
+представлено достаточным количеством прочтений, чтобы внести свой вклад в анализ. Удаление этих генов означает, что в конечном итоге мы имеем
+меньше тестов для выполнения, тем самым уменьшая проблемы, связанные с многократным тестированием. Здесь мы сохраняем только те гены
+которые представлены как минимум 1cpm (cpm=counts per million).
+
+```{r}
+countsPerMillion <- cpm(dgList) #S3 method, Compute counts per million (CPM) or reads per kilobase per million (RPKM) 
+summary(countsPerMillion)
+```
+
+## 3. Normalization
+важно нормализовать РНК-последовательность как внутри, так и между образцами.
+edgeR использует trimmed mean of M-values (TMM) method.
+```{r}
+countCheck <- countsPerMillion > 1
+head(countCheck)
+keep <- which(rowSums(countCheck) >= 2)
+dgList <- dgList[keep,]
+summary(cpm(dgList)) #compare this to the original summary
+```
+## 4. Data Exploration
+Мы можем изучить отношения между выборками, создав график на основе многомерного масштабирования.
+```{r}
+plotMDS(dgList) # из пакета limma
+``` 
+## 5. Setting up the Model
+
+Теперь мы готовы настроить модель! 
+Сначала нам нужно указать нашу матрицу проекта, которая описывает настройку эксперимент.
+```{r}
+sampleType <- rep("N", ncol(dgList)) #N=normal; T=tumour
+sampleType[grep("T", colnames(dgList))] <- "T"
+sampleReplicate <- paste("S", rep(1:3, each=2), sep="")
+
+designMat <- model.matrix(~sampleReplicate + sampleType)
+designMat
+
+
+```
+##6. Estimating Dispersion
+
+Нам нужно оценить параметр дисперсии для нашей отрицательной биномиальной модели. Так как их всего несколько
+образцы, трудно точно оценить дисперсию для каждого гена, поэтому нам нужен способ «обмена» информацией между генами. 
+
+В edgeR мы используем эмпирический метод Байеса, чтобы «сжать» оценки генетической дисперсии до общей дисперсии.
+(tagwise dispersion)
+
+```{r}
+#s3 Estimates a common negative binomial dispersion parameter for a DGE dataset with a general experimental design.
+dgList <- estimateGLMCommonDisp(dgList, design=designMat) 
+#s3 Estimates the abundance-dispersion trend by Cox-Reid approximate profile likelihood.
+dgList <- estimateGLMTrendedDisp(dgList, design=designMat)
+#s3 Compute an empirical Bayes estimate of the negative binomial dispersion parameter for each tag, with expression levels specified by a log-linear model.
+dgList <- estimateGLMTagwiseDisp(dgList, design=designMat)
+
+```
+
+```{r}
+plotBCV(dgList) #Plot the genewise biological coefficient of variation (BCV) against gene abundance (in log2 counts per million).
+
+```
+
+_The biological coefficient of variation (BCV) is the square root of the dispersion parameter in the negative binomial model._
+
+
+## 7.Differential Expression
+
+```{r}
+#s3 Fit a negative binomial generalized log-linear model to the read counts for each gene. Conduct genewise statistical tests for a given coefficient or coefficient contrast.
+fit <- glmFit(dgList, designMat)
+# Likelihood ratio tests for trend
+lrt <- glmLRT(fit, coef=4)
+```
+
+Теперь мы можем найти наши дифференциально выраженные гены. После подгонки модели мы можем использовать функцию topTags() для изучения результатов и установить пороги для идентификации подмножеств дифференциально экспрессируемых генов.
+```{r}
+#Extracts the most differentially expressed genes (or sequence tags) from a test object, ranked either by p-value or by absolute log-fold-change.
+edgeR_result <- topTags(lrt) 
+?topTags
+```
+
+Наконец, мы можем построить график логарифмических изменений всех генов и выделить те, которые экспрессируются по-разному.
+```{r}
+?decideTests
+#Identify which genes are significantly differentially expressed from an edgeR fit object containing p-values and test statistics.
+deGenes <- decideTestsDGE(lrt, p=0.001)
+
+deGenes <- rownames(lrt)[as.logical(deGenes)]
+#Make a mean-difference plot of two libraries of count data with smearing of points with very low counts, especially those that are zero for one of the columns.
+plotSmear(lrt, de.tags=deGenes)
+
+abline(h=c(-1, 1), col=2)
+```
+
